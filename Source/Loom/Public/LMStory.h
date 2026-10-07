@@ -31,7 +31,7 @@ struct FLMSpeaker
 {
 	FString Name;
 	FLinearColor Color = FLinearColor::White;
-	FString Key;                // disposition and seeded-check key ("elder", "bandit_captain", ...)
+	FString Key;                // disposition and seeded-check key ("guard_captain", ...)
 	FString Root;               // root dialogue node
 };
 
@@ -105,10 +105,10 @@ public:
 
 	// ---- state ----
 	int32 Seed = 0;
-	TMap<FString, FString> Flags;          // "met_elder" -> "true", "toll_outcome" -> "honor"
+	TMap<FString, FString> Flags;          // "met_captain" -> "true", "checkpoint_outcome" -> "bribed"
 	TMap<FString, float> Disposition;      // speaker key -> -100..100
 	TMap<FString, bool> Checks;            // seeded check key -> passed
-	TMap<FString, FString> Factions;       // "bandits" -> "neutral" | "hostile"
+	TMap<FString, FString> Factions;       // "smugglers" -> "neutral" | "hostile"
 	TMap<FString, FLMQuest> Quests;
 
 	bool HasFlag(const FString& Key) const { return Flags.Contains(Key); }
