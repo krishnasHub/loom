@@ -38,6 +38,7 @@ struct FLMSpeaker
 DECLARE_MULTICAST_DELEGATE(FLMEvent);
 DECLARE_MULTICAST_DELEGATE_TwoParams(FLMQuestEvent, const FString& /*QuestId*/, FName /*What: started, complete, turnedIn*/);
 DECLARE_MULTICAST_DELEGATE_TwoParams(FLMOutcome, const FString& /*Encounter*/, const FString& /*Outcome*/);
+DECLARE_MULTICAST_DELEGATE_TwoParams(FLMMoodEvent, float /*Mood*/, int32 /*Band*/);
 
 /**
  * The story state of one world, and the dialogue engine that reads and changes it.
@@ -46,14 +47,23 @@ DECLARE_MULTICAST_DELEGATE_TwoParams(FLMOutcome, const FString& /*Encounter*/, c
  *
  *   node     { "text": "..." | [ { "if": cond, "text": "..." }, ... ], "do": [ action... ], "choices": [ choice... ] }
  *   choice   { "text", "if": cond, "do": [ action... ], "next": node, "verb": id, "marker": "!" | "?",
- *              "check": { "resolve", "bonus": [ { "if", "add" } ], "success": node, "fail": node } }
+ *              "check": { "resolve", "bonus": [ { "if", "add" } ], "success": node, "fail": node,
+ *                         "level": { "min": n, "per": pct }, "tooLow": node } }
  *   cond     an object (all its keys must hold) or an array of them (all must hold). Built in:
  *              { "not": cond } { "quest": id, "is": status | [statuses] } { "flag": key [, "is": value] } { "disposition": { "gte": n } }
- *   action   { "if": cond, <key>: value }. Built in: startQuest, turnIn, setFlag, disposition, resolve ("encounter:outcome")
+ *              { "mood": { "gte": n } | { "lte": n } }
+ *   action   { "if": cond, <key>: value }. Built in: startQuest, turnIn, setFlag, disposition, resolve ("encounter:outcome"),
+ *              mood (+/- n)
+ *   mood     the world's mood ("mood": { "start", "min", "max", "bands": [thresholds, low to high] }): a hidden value the
+ *            story moves (AddMood, the "mood" action); OnMood fires on every change, OnMoodBand when it crosses a band.
+ *            Band 0 is the middle band; below it -1, -2..., above it 1, 2... The game decides what the mood looks like.
  *   text     {quest:id} -> "progress/count", plus any placeholder the game adds ({credits}, {rank}, ...)
  *
  * Checks are hidden rolls (formula: FLMCheckRules). The roll is seeded by (seed, speaker, choice), so reloading
- * can't change it, and a failed check stays failed.
+ * can't change it, and a failed check stays failed. A check with "level" scales with the hero's level (HeroLevel):
+ * below "min" it can't succeed (it goes to "tooLow" if given, else "fail"), and each level above adds "per" percent.
+ * Such a check is rolled again once per level gained after a failure, so the hero can come back stronger; a success is
+ * remembered for good.
  *
  * Everything game-specific is registered by the game: conditions (rank, credits...), actions (buy, open a door...), text
  * placeholders, how stats are read, what verbs cost. Loom never touches actors, UI or pausing; it raises events.
@@ -69,7 +79,7 @@ public:
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 
 	/** The JSON object holding the story sections (usually the game's whole data file). */
-	void SetData(const LMJson::FObj& InRoot) { Root = InRoot; }
+	void SetData(const LMJson::FObj& InRoot);
 	LMJson::FObj Entry(const FString& Section, const FString& Id) const { return LMJson::Obj(LMJson::Obj(Root, Section), Id); }
 
 	// ---- extension points (set up by the game) ----
@@ -83,8 +93,12 @@ public:
 	void AddPlaceholder(const FString& Key, TFunction<FString()> Fn) { Placeholders.Add(Key, MoveTemp(Fn)); }
 	/** The hero's value for a stat named by a verb ("presence", "might"...). */
 	TFunction<float(FName Stat)> StatValue;
+	/** The hero's level, for level-scaled checks ("check": { "level": ... }). Unset = 1. */
+	TFunction<int32()> HeroLevel;
 	/** How many of an item the hero carries ("collect" objectives). */
 	TFunction<int32(const FString& Item)> ItemCount;
+	/** What a base price costs right now ("{price:15}" in text; the game decides: mood, haggling...). */
+	TFunction<int32(int32 Base)> Price;
 	/** Can the hero use this verb at all (class-only verbs)? Default: yes. */
 	TFunction<bool(const LMJson::FObj& Verb)> VerbAvailable;
 	/** Adjust a choice's view for its verb (cost in the label, disabled when unaffordable...). */
@@ -102,6 +116,8 @@ public:
 	FLMOutcome OnResolved;            // an encounter was resolved
 	FLMEvent OnDialogueOpened, OnDialogueClosed;
 	FLMEvent OnDialogueChanged;       // new line or choices (also fires on close)
+	FLMMoodEvent OnMood;              // the world's mood moved
+	FLMMoodEvent OnMoodBand;          // ...into another band
 
 	// ---- state ----
 	int32 Seed = 0;
@@ -110,6 +126,12 @@ public:
 	TMap<FString, bool> Checks;            // seeded check key -> passed
 	TMap<FString, FString> Factions;       // "smugglers" -> "neutral" | "hostile"
 	TMap<FString, FLMQuest> Quests;
+	float Mood = 0.f;                      // the world's mood (hidden)
+
+	/** Move the world's mood (clamped); Why goes to the log. */
+	void AddMood(float Delta, const FString& Why = FString());
+	/** The band the mood is in: 0 in the middle, negative below, positive above. */
+	int32 MoodBand() const;
 
 	bool HasFlag(const FString& Key) const { return Flags.Contains(Key); }
 	void SetFlag(const FString& Key, const FString& Value = TEXT("true")) { Flags.Add(Key, Value); }
@@ -157,10 +179,15 @@ private:
 	float CheckChance(const LMJson::FObj& Choice) const;
 	bool ChoiceVisible(const LMJson::FObj& Choice) const;
 	FString CheckKey(const LMJson::FObj& Choice) const;
+	/** The key a check's roll is stored under: CheckKey, plus the hero's level for level-scaled checks (a new roll per level). */
+	FString RollKey(const LMJson::FObj& Choice) const;
+	int32 Level() const { return HeroLevel ? FMath::Max(1, HeroLevel()) : 1; }
 	FString NodeText(const LMJson::FObj& Node) const;
 	LMJson::FObj Verb(const LMJson::FObj& Choice) const;
 
 	LMJson::FObj Root;
+	TArray<float> MoodBands = { -60.f, -25.f, -8.f, 8.f, 25.f, 60.f };
+	float MoodMin = -100.f, MoodMax = 100.f;
 	TMap<FString, FCondition> Conditions;
 	TMap<FString, FAction> Actions;
 	TMap<FString, TFunction<FString()>> Placeholders;

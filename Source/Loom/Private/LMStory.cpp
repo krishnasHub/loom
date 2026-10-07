@@ -131,10 +131,45 @@ bool ULMStory::CondObj(const LMJson::FObj& C) const
 			bOk = C->HasField(TEXT("is")) ? (V && *V == LMJson::Str(C, TEXT("is"))) : V != nullptr;
 		}
 		else if (Key == TEXT("disposition")) bOk = Disposition.FindRef(Info.Key) >= LMJson::Num(LMJson::Obj(C, TEXT("disposition")), TEXT("gte"));
+		else if (Key == TEXT("mood"))
+		{
+			const LMJson::FObj M = LMJson::Obj(C, TEXT("mood"));
+			bOk = (!LMJson::Has(M, TEXT("gte")) || Mood >= LMJson::Num(M, TEXT("gte"))) && (!LMJson::Has(M, TEXT("lte")) || Mood <= LMJson::Num(M, TEXT("lte")));
+		}
 		else if (const FCondition* Fn = Conditions.Find(Key)) bOk = (*Fn)(C);
 		if (!bOk) return false;
 	}
 	return true;
+}
+
+void ULMStory::SetData(const LMJson::FObj& InRoot)
+{
+	Root = InRoot;
+	const LMJson::FObj M = LMJson::Obj(Root, TEXT("mood"));
+	if (!M) return;
+	Mood = float(LMJson::Num(M, TEXT("start"), 0));
+	MoodMin = float(LMJson::Num(M, TEXT("min"), -100));
+	MoodMax = float(LMJson::Num(M, TEXT("max"), 100));
+	const TArray<TSharedPtr<FJsonValue>> B = LMJson::Arr(M, TEXT("bands"));
+	if (B.Num() >= 2 && B.Num() % 2 == 0) { MoodBands.Reset(); for (const TSharedPtr<FJsonValue>& V : B) MoodBands.Add(float(V->AsNumber())); }
+}
+
+int32 ULMStory::MoodBand() const
+{
+	// Thresholds low to high, an even number of them: half below the middle band, half above.
+	int32 Above = 0;
+	for (const float T : MoodBands) if (Mood >= T) ++Above;
+	return Above - MoodBands.Num() / 2;
+}
+
+void ULMStory::AddMood(float Delta, const FString& Why)
+{
+	if (Delta == 0.f) return;
+	const int32 Was = MoodBand();
+	Mood = FMath::Clamp(Mood + Delta, MoodMin, MoodMax);
+	UE_LOG(LogLoom, Display, TEXT("World mood %+.1f -> %.1f (band %d)%s%s"), Delta, Mood, MoodBand(), Why.IsEmpty() ? TEXT("") : TEXT(": "), *Why);
+	OnMood.Broadcast(Mood, MoodBand());
+	if (MoodBand() != Was) OnMoodBand.Broadcast(Mood, MoodBand());
 }
 
 FString ULMStory::Template(const FString& Text) const
@@ -146,6 +181,13 @@ FString ULMStory::Template(const FString& Text) const
 		if (Out.Contains(Tag)) Out = Out.Replace(*Tag, *KV.Value());
 	}
 	int32 Start;
+	while ((Start = Out.Find(TEXT("{price:"))) != INDEX_NONE)
+	{
+		const int32 End = Out.Find(TEXT("}"), ESearchCase::CaseSensitive, ESearchDir::FromStart, Start);
+		if (End == INDEX_NONE) break;
+		const int32 Base = FCString::Atoi(*Out.Mid(Start + 7, End - Start - 7));
+		Out = Out.Left(Start) + FString::FromInt(Price ? Price(Base) : Base) + Out.Mid(End + 1);
+	}
 	while ((Start = Out.Find(TEXT("{quest:"))) != INDEX_NONE)
 	{
 		const int32 End = Out.Find(TEXT("}"), ESearchCase::CaseSensitive, ESearchDir::FromStart, Start);
@@ -215,9 +257,18 @@ FString ULMStory::CheckKey(const LMJson::FObj& Choice) const
 	return FString::Printf(TEXT("%d|%s|%s"), Seed, *Info.Key, *LMJson::Str(Choice, TEXT("_key")));
 }
 
+FString ULMStory::RollKey(const LMJson::FObj& Choice) const
+{
+	const bool bLevelled = LMJson::Has(LMJson::Obj(Choice, TEXT("check")), TEXT("level"));
+	return bLevelled ? FString::Printf(TEXT("%s|L%d"), *CheckKey(Choice), Level()) : CheckKey(Choice);
+}
+
 float ULMStory::CheckChance(const LMJson::FObj& Choice) const
 {
 	const LMJson::FObj Check = LMJson::Obj(Choice, TEXT("check"));
+	const LMJson::FObj Lv = LMJson::Obj(Check, TEXT("level"));
+	const int32 Min = int32(LMJson::Num(Lv, TEXT("min"), 1));
+	if (Lv && Level() < Min) return 0.f;   // too inexperienced: it can't work yet
 	const LMJson::FObj V = Verb(Choice);
 	auto Stat = [&](const FString& Name) { return StatValue && !Name.IsEmpty() ? StatValue(FName(Name)) : 0.f; };
 	const FLMCheckRules& R = CheckRules;
@@ -226,6 +277,7 @@ float ULMStory::CheckChance(const LMJson::FObj& Choice) const
 		+ Disposition.FindRef(Info.Key) / FMath::Max(R.DispositionDiv, 0.001f);
 	for (const TSharedPtr<FJsonValue>& B : LMJson::Arr(Check, TEXT("bonus")))
 		if (CheckCond(B->AsObject()->TryGetField(TEXT("if")))) Pct += float(LMJson::Num(B->AsObject(), TEXT("add"), 0));
+	if (Lv) Pct += float(LMJson::Num(Lv, TEXT("per"), 0)) * (Level() - Min);
 	return FMath::Clamp(Pct, R.Min, R.Max) / 100.f;
 }
 
@@ -234,8 +286,10 @@ bool ULMStory::ChoiceVisible(const LMJson::FObj& Choice) const
 	if (LMJson::Has(Choice, TEXT("verb")) && VerbAvailable && !VerbAvailable(Verb(Choice))) return false;
 	if (LMJson::Has(Choice, TEXT("check")))
 	{
-		const bool* Done = Checks.Find(CheckKey(Choice));
-		if (Done && !*Done) return false;   // a failed check stays failed
+		// A failed check stays failed (a level-scaled one only until the hero levels up: RollKey has the level in it).
+		const bool* Won = Checks.Find(CheckKey(Choice));
+		const bool* Done = Checks.Find(RollKey(Choice));
+		if (!(Won && *Won) && Done && !*Done) return false;
 	}
 	return CheckCond(Choice->TryGetField(TEXT("if")));
 }
@@ -298,11 +352,17 @@ void ULMStory::Choose(int32 Index)
 	FString Next = LMJson::Str(C, TEXT("next"));
 	if (const LMJson::FObj Check = LMJson::Obj(C, TEXT("check")))
 	{
-		const FString Key = CheckKey(C);
-		if (ForcedCheck.IsSet()) { Checks.Add(Key, ForcedCheck.GetValue()); ForcedCheck.Reset(); }
+		const FString Base = CheckKey(C), Key = RollKey(C);
+		const LMJson::FObj Lv = LMJson::Obj(Check, TEXT("level"));
+		const bool bTooLow = Lv && Level() < int32(LMJson::Num(Lv, TEXT("min"), 1));
+		if (ForcedCheck.IsSet()) { Checks.Add(Key, ForcedCheck.GetValue() && !bTooLow); ForcedCheck.Reset(); }   // forcing never beats the level floor
+		if (Checks.FindRef(Base)) Checks.Add(Key, true);   // already won it once: it stays won
 		if (!Checks.Contains(Key)) Checks.Add(Key, SeededRandom(Key) < CheckChance(C));
-		Next = Checks[Key] ? LMJson::Str(Check, TEXT("success")) : LMJson::Str(Check, TEXT("fail"));
-		UE_LOG(LogLoom, Display, TEXT("Dialogue check %s (%s): %s"), *Key, *LMJson::Str(C, TEXT("verb"), DefaultVerb), Checks[Key] ? TEXT("success") : TEXT("fail"));
+		if (Checks[Key]) Checks.Add(Base, true);
+		Next = Checks[Key] ? LMJson::Str(Check, TEXT("success"))
+			: bTooLow && LMJson::Has(Check, TEXT("tooLow")) ? LMJson::Str(Check, TEXT("tooLow")) : LMJson::Str(Check, TEXT("fail"));
+		UE_LOG(LogLoom, Display, TEXT("Dialogue check %s (%s, level %d): %s"), *Key, *LMJson::Str(C, TEXT("verb"), DefaultVerb), Level(),
+			Checks[Key] ? TEXT("success") : bTooLow ? TEXT("too low a level") : TEXT("fail"));
 	}
 	RunActions(LMJson::Arr(C, TEXT("do")));
 	if (!bOpen) return;
@@ -331,6 +391,7 @@ void ULMStory::RunActions(const TArray<TSharedPtr<FJsonValue>>& List)
 			else if (Key == TEXT("turnIn")) TurnIn(KV.Value->AsString());
 			else if (Key == TEXT("setFlag")) SetFlag(KV.Value->AsString());
 			else if (Key == TEXT("disposition")) { float& D = Disposition.FindOrAdd(Info.Key); D = FMath::Clamp(D + float(KV.Value->AsNumber()), CheckRules.DispositionMin, CheckRules.DispositionMax); }
+			else if (Key == TEXT("mood")) AddMood(float(KV.Value->AsNumber()), NodeId);
 			else if (Key == TEXT("resolve")) { FString Enc, Outcome; if (KV.Value->AsString().Split(TEXT(":"), &Enc, &Outcome)) Resolve(Enc, Outcome); }
 			else if (const FAction* Fn = Actions.Find(Key)) (*Fn)(A);
 			else UE_LOG(LogLoom, Warning, TEXT("Unknown dialogue action \"%s\""), *Key);
