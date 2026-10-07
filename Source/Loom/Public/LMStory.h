@@ -11,8 +11,8 @@ struct FLMQuest { FString Status = TEXT("none"); int32 Progress = 0; };   // non
 struct FLMChoiceView
 {
 	FString Text;
-	FString VerbId;             // "" or the choice's verb ("persuade", "hypnotize", ...)
-	FString Verb;               // label shown before the text ("Persuade"); DecorateVerb may extend it ("Hypnotize · 20 mana")
+	FString VerbId;             // "" or the choice's verb ("persuade", "hack", ...)
+	FString Verb;               // label shown before the text ("Persuade"); DecorateVerb may extend it ("Hack · 20 energy")
 	bool bEnabled = true;
 	FString Odds;               // only with bShowOdds (tuning)
 };
@@ -50,12 +50,12 @@ DECLARE_MULTICAST_DELEGATE_TwoParams(FLMOutcome, const FString& /*Encounter*/, c
  *   cond     an object (all its keys must hold) or an array of them (all must hold). Built in:
  *              { "not": cond } { "quest": id, "is": status | [statuses] } { "flag": key [, "is": value] } { "disposition": { "gte": n } }
  *   action   { "if": cond, <key>: value }. Built in: startQuest, turnIn, setFlag, disposition, resolve ("encounter:outcome")
- *   text     {quest:id} -> "progress/count", plus any placeholder the game adds ({gold}, {title}, ...)
+ *   text     {quest:id} -> "progress/count", plus any placeholder the game adds ({credits}, {rank}, ...)
  *
  * Checks are hidden rolls (formula: FLMCheckRules). The roll is seeded by (seed, speaker, choice), so reloading
  * can't change it, and a failed check stays failed.
  *
- * Everything game-specific is registered by the game: conditions (class, gold...), actions (buy, duel...), text
+ * Everything game-specific is registered by the game: conditions (rank, credits...), actions (buy, open a door...), text
  * placeholders, how stats are read, what verbs cost. Loom never touches actors, UI or pausing; it raises events.
  */
 UCLASS()
