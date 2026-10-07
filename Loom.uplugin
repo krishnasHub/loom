@@ -1,0 +1,13 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1",
+	"FriendlyName": "Loom",
+	"Description": "Story engine: branching dialogue with hidden seeded checks, flags, disposition, factions, quests and encounter outcomes. Data-driven (JSON); games register their own conditions, actions and text placeholders.",
+	"Category": "Gameplay",
+	"CreatedBy": "krishnasHub",
+	"CanContainContent": false,
+	"Modules": [
+		{ "Name": "Loom", "Type": "Runtime", "LoadingPhase": "Default" }
+	]
+}
