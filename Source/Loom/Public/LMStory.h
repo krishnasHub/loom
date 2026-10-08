@@ -172,9 +172,11 @@ public:
 	/** "?" (a quest to turn in), "!" (a quest on offer) or "" for a root dialogue node. */
 	FString MarkerFor(const FString& RootNode) const;
 
+	/** Run a list of data actions (as a dialogue choice's "do" would), outside a conversation too. */
+	void RunActions(const TArray<TSharedPtr<FJsonValue>>& List);
+
 private:
 	void ShowNode(const FString& Id);
-	void RunActions(const TArray<TSharedPtr<FJsonValue>>& List);
 	bool CondObj(const LMJson::FObj& C) const;
 	float CheckChance(const LMJson::FObj& Choice) const;
 	bool ChoiceVisible(const LMJson::FObj& Choice) const;
